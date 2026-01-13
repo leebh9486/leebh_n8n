@@ -1,0 +1,536 @@
+{
+  "name": "메일 자동 답변 Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "filters": {}
+      },
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -32,
+        0
+      ],
+      "id": "5d595da5-1666-4006-b18d-111ce1a3ec9b",
+      "name": "Gmail Trigger",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "bEXBooGuh8YRGAGW",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "6dcd18b1-aa2a-4e92-a7aa-40ef779d8053",
+              "leftValue": "={{ $json.From }}",
+              "rightValue": "no-reply",
+              "operator": {
+                "type": "string",
+                "operation": "contains"
+              }
+            },
+            {
+              "id": "566d340d-d58b-455f-876c-edbd97dcee1a",
+              "leftValue": "={{ $json.From }}",
+              "rightValue": "noreply",
+              "operator": {
+                "type": "string",
+                "operation": "contains"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        144,
+        0
+      ],
+      "id": "bf367098-1b70-4dde-9d7f-99be6a730a91",
+      "name": "no-reply skip"
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "messageId": "=19bafd9e01f00f13",
+        "simple": false,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        320,
+        96
+      ],
+      "id": "dc5b477b-cb41-41a6-803f-abc9bc0bd478",
+      "name": "메일 본문 가져오기",
+      "webhookId": "a5e64190-ed93-418f-8ea7-bb9c2e87d4a7",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "bEXBooGuh8YRGAGW",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-5-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-5-MINI"
+        },
+        "responses": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You analyze an email and output ONLY valid JSON following this schema:\n{\n  \"summary_1line\": string,\n  \"importance\": number,\n  \"need_reply\": boolean,\n  \"reply_draft\": string|null,\n  \"reasons\": string[]\n}\n\nRules:\n- Output MUST be JSON only. No extra text.\n- importance must be 0..10.\nAnchors:\n0-2: notification/ads/automated\n3-5: informational\n6-7: work-related, may affect schedule\n8-10: urgent: deadline, incident, money, legal, customer, immediate action\n- need_reply=true if the sender asks a question/request/approval/scheduling/deadline/reminder etc.\n- If need_reply=false then reply_draft MUST be null.\n- reasons: 2-5 short bullet-like strings explaining importance and/or need_reply.\n- If need_reply=true, reply_draft should be a polite, concise suggested reply in Korean.\n- Ignore attachments completely.\n- Do NOT mention attachments in summary_1line, reasons, or reply_draft, even if the email body mentions attachments.\n- Do NOT ask the sender to resend attachments.\n"
+            },
+            {
+              "content": "=Email:\n- Subject: {{ $json.mail.subject }}\n- From: {{ $json.mail.from }}\n- To: {{ $json.mail.to }}\n- Date: {{ $json.mail.date }}\n- Body (text):\n{{ $json.mail.body }}\n"
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.1,
+      "position": [
+        640,
+        96
+      ],
+      "id": "7be7fd59-6728-4d2e-8d0f-75c3f6d646ba",
+      "name": "메일 요약 / 중요도와 답변 필요여부 평가",
+      "credentials": {
+        "openAiApi": {
+          "id": "H3jZgLq6AoBuue9t",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// LLM 노드 결과(JSON)에서 실제 텍스트(JSON 문자열)를 꺼내 파싱\nconst raw = $json.output?.[0]?.content?.[0]?.text;\n\nif (!raw) {\n  throw new Error(\"LLM output text not found at output[0].content[0].text\");\n}\n\nlet parsed;\ntry {\n  parsed = JSON.parse(raw);\n} catch (e) {\n  // 흔한 예외: 앞뒤에 잡문이 섞였거나, 백틱으로 감싼 경우 대비\n  const cleaned = raw.trim().replace(/^```json\\s*|^```\\s*|```$/g, \"\");\n  parsed = JSON.parse(cleaned);\n}\n\nreturn [{ json: parsed }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        944,
+        96
+      ],
+      "id": "0feec0d9-223b-43de-9b9b-6b166ee78737",
+      "name": "LLM 답변에서 Json 추출"
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "databaseId": {
+          "__rl": true,
+          "value": "2e6eb770-ddee-8066-b152-f7c7aa234cf7",
+          "mode": "list",
+          "cachedResultName": "2e6eb770-ddee-8066-b152-f7c7aa234cf7",
+          "cachedResultUrl": "https://www.notion.so/2e6eb770ddee8066b152f7c7aa234cf7"
+        },
+        "title": "={{ $('메일 정보 변수 설정').item.json.mail.subject }}",
+        "propertiesUi": {
+          "propertyValues": [
+            {
+              "key": "Date|rich_text",
+              "textContent": "={{ $('메일 정보 변수 설정').item.json.mail.date }}"
+            },
+            {
+              "key": "From|rich_text",
+              "textContent": "={{ $('메일 정보 변수 설정').item.json.mail.from }}"
+            },
+            {
+              "key": "To|rich_text",
+              "textContent": "={{ $('메일 정보 변수 설정').item.json.mail.to }}"
+            },
+            {
+              "key": "Summary|rich_text",
+              "textContent": "={{ $json.summary_1line }}"
+            },
+            {
+              "key": "Importance|number",
+              "numberValue": "={{ $json.importance }}"
+            },
+            {
+              "key": "Need_reply|checkbox",
+              "checkboxValue": "={{ $json.need_reply }}"
+            },
+            {
+              "key": "Reasons|rich_text",
+              "textContent": "={{ $json.reasons.join(\", \") }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [
+        1152,
+        96
+      ],
+      "id": "a87f0739-b15e-4e16-bf31-ccdcdf02fa55",
+      "name": "노션에 메일 로그 저장",
+      "credentials": {
+        "notionApi": {
+          "id": "P8JfGIep8Kqa1zoK",
+          "name": "Notion account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "select": "user",
+        "user": {
+          "__rl": true,
+          "value": "U0A7NJGMY79",
+          "mode": "list",
+          "cachedResultName": "leebh6431"
+        },
+        "text": "=[메일 알림]\n[Importance: {{ $('LLM 답변에서 Json 추출').item.json.importance }}/10] {{ $('메일 정보 변수 설정').item.json.mail.subject }}\n{{ $('메일 정보 변수 설정').item.json.mail.from }}\n{{ $('메일 정보 변수 설정').item.json.mail.date }}\n\n내용: {{ $('LLM 답변에서 Json 추출').item.json.summary_1line }}\n\n[답변 추천]\n{{ $('LLM 답변에서 Json 추출').item.json.reply_draft }}\n\n메일 바로가기\nhttps://mail.google.com/mail/u/0/#inbox/{{ $('Gmail Trigger').item.json.threadId }}",
+        "otherOptions": {}
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.4,
+      "position": [
+        144,
+        432
+      ],
+      "id": "55ebc2e4-fedc-48e8-97c5-fd0ae9aedf43",
+      "name": "슬랙 메시지 전송",
+      "webhookId": "f6a173a4-ffc3-4f11-adb3-93bb58e768e9",
+      "credentials": {
+        "slackOAuth2Api": {
+          "id": "RBLsFi5mTdh2IE44",
+          "name": "Slack account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "a9df248e-6a0c-41b6-bea5-0d800492fb67",
+              "leftValue": "={{ $('LLM 답변에서 Json 추출').item.json.need_reply }}",
+              "rightValue": {},
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "984e790d-3726-4b35-8e2c-a127917da439",
+              "leftValue": "={{ $('LLM 답변에서 Json 추출').item.json.importance }}",
+              "rightValue": 6,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -32,
+        544
+      ],
+      "id": "c432ba3a-bc67-4356-b2bc-614eb0cf7e61",
+      "name": "If 답변 필요 or 중요도 > 6"
+    },
+    {
+      "parameters": {
+        "operation": "reply",
+        "messageId": "={{ $('Gmail Trigger').item.json.id }}",
+        "emailType": "text",
+        "message": "={{ $('LLM 답변에서 Json 추출').item.json.reply_draft }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        544,
+        336
+      ],
+      "id": "f271979e-6bb7-4b90-8353-fbd644266f21",
+      "name": "메일 답장 전송",
+      "webhookId": "5207f46c-78bf-4810-8137-f5486d9c1eda",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "bEXBooGuh8YRGAGW",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "a9df248e-6a0c-41b6-bea5-0d800492fb67",
+              "leftValue": "={{ $('LLM 답변에서 Json 추출').item.json.need_reply }}",
+              "rightValue": {},
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "429562ad-7de4-40a7-baa1-c522116f6c46",
+              "leftValue": "={{ $('Gmail Trigger').item.json.From }}",
+              "rightValue": "={{ $('Gmail Trigger').item.json.To }}",
+              "operator": {
+                "type": "string",
+                "operation": "notContains"
+              }
+            },
+            {
+              "id": "fb9c514b-4689-483c-beb6-e6af48fff12c",
+              "leftValue": "={{ $('Gmail Trigger').item.json.From }}",
+              "rightValue": "no-reply",
+              "operator": {
+                "type": "string",
+                "operation": "notContains"
+              }
+            },
+            {
+              "id": "0f46cfd8-690b-4fc9-9cc7-51bf8c28e47c",
+              "leftValue": "={{ $('Gmail Trigger').item.json.From }}",
+              "rightValue": "noreply",
+              "operator": {
+                "type": "string",
+                "operation": "notContains"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        336,
+        432
+      ],
+      "id": "eed5c740-bff3-4739-aa47-addbc282800f",
+      "name": "If 답변 필요 and 발신인이 자기자신 또는 noreply가 아님"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "f3aa6008-c7e7-4a2f-9a20-6c3728914d69",
+              "name": "mail.subject",
+              "value": "={{ $('Gmail Trigger').item.json.Subject }}",
+              "type": "string"
+            },
+            {
+              "id": "f3688658-7573-4377-96ce-ca7abc46b70a",
+              "name": "mail.from",
+              "value": "={{ $('Gmail Trigger').item.json.From }}",
+              "type": "string"
+            },
+            {
+              "id": "9047f44c-d813-4df9-8273-5cef05677bef",
+              "name": "mail.to",
+              "value": "={{ $('Gmail Trigger').item.json.To }}",
+              "type": "string"
+            },
+            {
+              "id": "9f587e30-8d05-49d9-adfb-7a1e87f9c0a1",
+              "name": "mail.date",
+              "value": "={{ $json.date }}",
+              "type": "string"
+            },
+            {
+              "id": "672250f4-7bda-47f0-9ce1-b9d73517cf2b",
+              "name": "mail.body",
+              "value": "={{ $json.text }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        480,
+        96
+      ],
+      "id": "d4dc16b2-2062-4f11-9738-a1163a18dac2",
+      "name": "메일 정보 변수 설정"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Gmail Trigger": {
+      "main": [
+        [
+          {
+            "node": "no-reply skip",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "no-reply skip": {
+      "main": [
+        [],
+        [
+          {
+            "node": "메일 본문 가져오기",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "메일 본문 가져오기": {
+      "main": [
+        [
+          {
+            "node": "메일 정보 변수 설정",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "메일 요약 / 중요도와 답변 필요여부 평가": {
+      "main": [
+        [
+          {
+            "node": "LLM 답변에서 Json 추출",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM 답변에서 Json 추출": {
+      "main": [
+        [
+          {
+            "node": "노션에 메일 로그 저장",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "노션에 메일 로그 저장": {
+      "main": [
+        [
+          {
+            "node": "If 답변 필요 or 중요도 > 6",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "슬랙 메시지 전송": {
+      "main": [
+        [
+          {
+            "node": "If 답변 필요 and 발신인이 자기자신 또는 noreply가 아님",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If 답변 필요 or 중요도 > 6": {
+      "main": [
+        [
+          {
+            "node": "슬랙 메시지 전송",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If 답변 필요 and 발신인이 자기자신 또는 noreply가 아님": {
+      "main": [
+        [
+          {
+            "node": "메일 답장 전송",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "메일 정보 변수 설정": {
+      "main": [
+        [
+          {
+            "node": "메일 요약 / 중요도와 답변 필요여부 평가",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "versionId": "e8172aa6-26b3-4a4a-ac0e-93758d5eca91",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "84acc1166fdfb779378748fd38ef890ea67269876209a57f0227c97e2b1d1978"
+  },
+  "id": "N6eB7KY7TQZi3dA5H-EsV",
+  "tags": []
+}
