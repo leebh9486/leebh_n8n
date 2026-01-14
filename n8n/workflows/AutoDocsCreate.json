@@ -1,0 +1,344 @@
+{
+  "name": "Workflow Docs 자동 생성 Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "owner": {
+          "__rl": true,
+          "value": "leebh9486",
+          "mode": "list",
+          "cachedResultName": "leebh9486",
+          "cachedResultUrl": "https://github.com/leebh9486"
+        },
+        "repository": {
+          "__rl": true,
+          "value": "leebh_n8n",
+          "mode": "list",
+          "cachedResultName": "leebh_n8n",
+          "cachedResultUrl": "https://github.com/leebh9486/leebh_n8n"
+        },
+        "events": [
+          "push"
+        ],
+        "options": {
+          "insecureSSL": false
+        }
+      },
+      "type": "n8n-nodes-base.githubTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "c54f8ab5-6656-4cc3-a1de-6d1b147cd307",
+      "name": "Github Trigger",
+      "webhookId": "4d58aa1d-5698-4e45-a17a-b26ab545a0dc",
+      "credentials": {
+        "githubOAuth2Api": {
+          "id": "tkhQgqFfO7tIlNWp",
+          "name": "GitHub account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://api.github.com/repos/{{ $json.body.repository.owner.login }}/{{ $json.body.repository.name }}/compare/{{$json.body.before}}...{{$json.body.after}}\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        160,
+        0
+      ],
+      "id": "d0a3ab13-d5e1-48eb-9ead-4d6393d0f9ac",
+      "name": "Push 정보 가져오기"
+    },
+    {
+      "parameters": {
+        "jsCode": "const files = $json.files || [];\nconst targets = files\n  .map(f => f.filename)\n  .filter(p => /^n8n\\/workflows\\/.+\\.json$/i.test(p));\n\nconst uniq = [...new Set(targets)];\n\nreturn uniq.map(path => {\n  const file = path.split('/').pop();      // <workflowName>.json\n  const workflowName = file.replace(/\\.json$/i, '');\n  const pageName = workflowName;           // wiki 페이지 파일명\n  return { json: { path, workflowName, pageName } };\n});\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        336,
+        0
+      ],
+      "id": "a0f6ac0b-ac5a-48b1-8592-a3d3638430c1",
+      "name": "변경 파일 목록 추출"
+    },
+    {
+      "parameters": {
+        "url": "=https://api.github.com/repos/{{ $('Github Trigger').item.json.body.repository.owner.login }}/{{ $('Github Trigger').item.json.body.repository.name }}/contents/{{$json.path}}?ref={{ $('Github Trigger').item.json.body.after }}\n",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github.raw+json"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        528,
+        0
+      ],
+      "id": "bad7268d-6434-4265-9bff-04d2681d7f7a",
+      "name": "Workflow json data 추출"
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * n8n Workflow JSON -> 구조 요약(nodes/edges) + Mermaid(flowchart TD) 생성 (최종 완성본)\n *\n * ✅ 지원\n * - HTTP Request raw 응답이 { data: \"...\" } 인 경우\n * - raw가 string인 경우\n * - 이미 object인 경우\n * - connections.main (2중 배열) 파싱\n * - IF 노드(true/false) 분기 라벨 표시\n * - IF 노드에서 비어있는 분기(branch)면 End 노드 자동 생성\n * - ⭐ IF 노드인데 main 분기가 1개만 있는 경우도, 누락된 분기를 \"빈 분기\"로 간주해 End 생성\n *\n * 출력:\n * - wf_meta\n * - nodes: [{name,type,disabled,notes,isSyntheticEnd?}]\n * - edges: [{from,to,label?,branchIndex?}]\n * - mermaid: string\n */\n\n// 1) workflow JSON 파싱 (data/string/object 모두 대응)\nconst rawCandidate =\n  (typeof $json?.data === 'string' && $json.data.trim().length > 0) ? $json.data :\n  (typeof $json === 'string' ? $json : null);\n\nlet wf;\nif (rawCandidate) {\n  wf = JSON.parse(rawCandidate);\n} else if ($json && typeof $json === 'object') {\n  wf = $json;\n} else {\n  throw new Error('Workflow JSON not found (expected $json.data string or $json object)');\n}\n\n// 2) 노드 메타 수집\nconst nodesRaw = wf.nodes || [];\nconst nodes = nodesRaw.map(n => ({\n  name: n.name,\n  type: n.type,\n  disabled: !!n.disabled,\n  notes: n.notes || '',\n}));\n\n// name -> type 맵\nconst nodeTypeByName = new Map(nodesRaw.map(n => [n.name, n.type]));\n\n// IF 노드 판별\nconst isIfNode = (nodeName) => {\n  const t = nodeTypeByName.get(nodeName) || '';\n  return t === 'n8n-nodes-base.if' || t.endsWith('.if');\n};\n\n// 3) connections 파싱 -> edges 생성 + IF 분기 라벨 + End 노드 자동 생성\nconst connections = wf.connections || {};\nconst edges = [];\nconst syntheticEndNodes = []; // End 노드 추가 목록\n\nconst safeId = (s) => (s || '')\n  .toString()\n  .replace(/[^a-zA-Z0-9_가-힣]/g, '_');\n\n// Mermaid에서 같은 safeId 충돌 방지용\nconst uniqueSafeId = (() => {\n  const used = new Set();\n  return (name) => {\n    let base = safeId(name);\n    let id = base;\n    let i = 2;\n    while (used.has(id)) id = `${base}_${i++}`;\n    used.add(id);\n    return id;\n  };\n})();\n\n// 노드명 -> Mermaid ID 캐시\nconst nodeId = new Map();\nconst getNodeId = (name) => {\n  if (!nodeId.has(name)) nodeId.set(name, uniqueSafeId(name));\n  return nodeId.get(name);\n};\n\nconst labelForBranch = (fromName, branchIndex) => {\n  if (isIfNode(fromName)) {\n    if (branchIndex === 0) return 'true';\n    if (branchIndex === 1) return 'false';\n  }\n  return `out${branchIndex}`;\n};\n\nconst ensureSyntheticEnd = (fromName, branchIndex) => {\n  const endName = `${fromName}__END__${branchIndex === 0 ? 'true' : 'false'}`;\n  syntheticEndNodes.push({\n    name: endName,\n    type: 'synthetic.end',\n    disabled: false,\n    notes: '',\n    isSyntheticEnd: true,\n  });\n  edges.push({\n    from: fromName,\n    to: endName,\n    label: labelForBranch(fromName, branchIndex),\n    branchIndex,\n  });\n};\n\nfor (const [fromName, outs] of Object.entries(connections)) {\n  const isIf = isIfNode(fromName);\n\n  // main: branches(array of arrays). 없으면 빈 배열\n  const mainRaw = Array.isArray(outs?.main) ? outs.main : [];\n\n  // ⭐ IF 노드는 항상 2개(true/false)를 기대한다고 보고,\n  // main이 0~1개만 오면 부족한 분기는 \"빈 분기\"로 채운다.\n  let main = mainRaw;\n  if (isIf) {\n    main = [mainRaw[0] ?? [], mainRaw[1] ?? []];\n  }\n\n  // 연결이 완전히 없으면 스킵(단, IF면 위에서 2개로 채웠으니 여기서 스킵 안 됨)\n  if (!isIf && main.length === 0) continue;\n\n  main.forEach((branch, branchIndex) => {\n    const links = Array.isArray(branch) ? branch : [];\n\n    // IF 노드인데 해당 branch가 비어있으면 End 노드 생성\n    if (isIf && links.length === 0) {\n      ensureSyntheticEnd(fromName, branchIndex);\n      return;\n    }\n\n    // links가 있으면 정상 연결 생성\n    for (const link of links) {\n      if (!link?.node) continue;\n      edges.push({\n        from: fromName,\n        to: link.node,\n        label: isIf ? labelForBranch(fromName, branchIndex) : undefined,\n        branchIndex,\n      });\n    }\n  });\n}\n\n// 합성 End 노드 추가(중복 방지)\nfor (const n of syntheticEndNodes) {\n  if (!nodeTypeByName.has(n.name)) {\n    nodes.push(n);\n    nodeTypeByName.set(n.name, n.type);\n  }\n}\n\n// 4) Mermaid 생성\nconst mermaid = ['flowchart TD'];\n\n// 노드 선언\nfor (const n of nodes) {\n  const id = getNodeId(n.name);\n  const label = n.isSyntheticEnd\n    ? `${n.name}\\n(END)`\n    : `${n.name}\\n(${n.type})`;\n  mermaid.push(`  ${id}[\"${label.replace(/\"/g, '\\\\\"')}\"]`);\n}\n\n// 엣지 선언\nfor (const e of edges) {\n  const fromId = getNodeId(e.from);\n  const toId = getNodeId(e.to);\n  if (e.label) mermaid.push(`  ${fromId} -->|${e.label}| ${toId}`);\n  else mermaid.push(`  ${fromId} --> ${toId}`);\n}\n\n// 5) 출력 구성\nconst out = {\n  ...$json,\n  wf_meta: {\n    name: wf.name || 'Unnamed Workflow',\n    id: wf.id || null,\n    active: wf.active ?? null,\n    versionId: wf.versionId || null,\n  },\n  nodes,\n  edges,\n  mermaid: mermaid.join('\\n'),\n};\n\n// 원문 JSON 문자열은 크면 제거\nif (out.data) delete out.data;\n\nreturn [{ json: out }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        736,
+        0
+      ],
+      "id": "3b434bb4-3e26-40df-a5e6-0c0f7a278c88",
+      "name": "Json의 정보로 FlowChart 생성"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-5-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-5-MINI"
+        },
+        "responses": {
+          "values": [
+            {
+              "role": "system",
+              "content": "너는 n8n 워크플로우 문서화 봇이다.\n입력으로 제공된 정보(메타/노드/엣지/머메이드)만 근거로 마크다운 문서를 작성하라.\n추측하지 말고 정보가 없으면 '확인 필요'라고 써라.\n출력은 마크다운 본문만 출력하라.\n\n다음 구조를 기반으로 GitHub Wiki 페이지용 문서를 작성해줘.\n\n문서 섹션(이 순서 유지):\n1) Overview\n2) Diagram (Mermaid)\n3) Nodes (표: name | type | disabled | role)\n4) Flow (단계별)\n5) Branching (IF는 true/false 라벨 기반으로만 설명)\n6) External Integrations\n7) Ops Notes"
+            },
+            {
+              "content": "=Workflow: {{$json.wf_meta}}\nMermaid:\n```mermaid\n{{$json.mermaid}}\n```\nNodes:\n{{$json.nodes}}\nEdges:\n{{$json.edges}}\n"
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.1,
+      "position": [
+        928,
+        0
+      ],
+      "id": "965e5ffd-533b-41b9-bfa7-e9a900dc1d6c",
+      "name": "마크다운 문서 생성",
+      "credentials": {
+        "openAiApi": {
+          "id": "H3jZgLq6AoBuue9t",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const md = $json.output?.[0]?.content?.[0]?.text;\nif (!md) throw new Error('LLM markdown not found');\n\nconst contentB64 = Buffer.from(md, 'utf8').toString('base64');\n\nreturn [{\n  json: {\n    ...$json,\n    markdown: md,\n    contentB64,\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1248,
+        0
+      ],
+      "id": "12e0ab3c-859d-4fc3-8f2d-1fcd34f1f949",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "url": "=https://api.github.com/repos/{{ $('Github Trigger').item.json.body.repository.owner.login }}/{{ $('Github Trigger').item.json.body.repository.name }}/contents/n8n/docs/{{ $('변경 파일 목록 추출').item.json.pageName }}.md?ref={{ $('Github Trigger').item.json.body.repository.default_branch || 'main' }}\n",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1440,
+        0
+      ],
+      "id": "8b3cf6f8-65a8-44e6-b9e6-6f1c5e8fb1e7",
+      "name": "Wiki에 기존 문서 있는지(sha) 조회",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const md = $('Code in JavaScript').first().json.markdown;\nif (!md) throw new Error('markdown missing');\n\nconst contentB64 = Buffer.from(md, 'utf8').toString('base64');\n\n// GET 노드에서 sha가 들어온 경우를 대비해 sha를 끌고 오기\n// (GET 노드 이름을 \"Get doc sha\"라고 가정)\nconst sha = $json.sha; // 만약 바로 이전 노드가 GET이면 여기로 들어올 수도 있음\n\nconst body = {\n  message: `docs: upsert ${$json.pageName}.md`,\n  content: contentB64,\n};\n\nif (sha) body.sha = sha;\n\nreturn [{ json: { ...$json, contentB64, putBody: body } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1648,
+        0
+      ],
+      "id": "f8b647b2-e1e7-49f5-a56f-c5e1502ae396",
+      "name": "Git Push 할 Body 생성"
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "=https://api.github.com/repos/{{ $('Github Trigger').item.json.body.repository.owner.login }}/{{ $('Github Trigger').item.json.body.repository.name }}/contents/n8n/docs/{{ $('변경 파일 목록 추출').item.json.pageName }}.md",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.putBody }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1856,
+        0
+      ],
+      "id": "854130ef-0a07-437e-90dd-31a36931d145",
+      "name": "Git Push",
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "QfDCjXtpIKa8bxH1",
+          "name": "Bearer Auth account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Github Trigger": {
+      "main": [
+        [
+          {
+            "node": "Push 정보 가져오기",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Push 정보 가져오기": {
+      "main": [
+        [
+          {
+            "node": "변경 파일 목록 추출",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "변경 파일 목록 추출": {
+      "main": [
+        [
+          {
+            "node": "Workflow json data 추출",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Workflow json data 추출": {
+      "main": [
+        [
+          {
+            "node": "Json의 정보로 FlowChart 생성",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Json의 정보로 FlowChart 생성": {
+      "main": [
+        [
+          {
+            "node": "마크다운 문서 생성",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "마크다운 문서 생성": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Wiki에 기존 문서 있는지(sha) 조회",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wiki에 기존 문서 있는지(sha) 조회": {
+      "main": [
+        [
+          {
+            "node": "Git Push 할 Body 생성",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Git Push 할 Body 생성": {
+      "main": [
+        [
+          {
+            "node": "Git Push",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "versionId": "814f3ca4-5e0b-426b-9092-0364814f6247",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "84acc1166fdfb779378748fd38ef890ea67269876209a57f0227c97e2b1d1978"
+  },
+  "id": "Fo68Yg2PR-NBD8OFNcb_2",
+  "tags": []
+}
